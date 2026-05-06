@@ -823,6 +823,16 @@ function Base.sincospi(x::TracedRNumber{T}) where {T}
     return @opcall(sine(T(π) * x)), @opcall(cosine(T(π) * x))
 end
 
+function Base.cispi(x::TracedRNumber)
+    s, c = sincospi(x)
+    return complex(c, s)
+end
+
+function Base.cis(x::TracedRNumber)
+    s, c = sincos(x)
+    return complex(c, s)
+end
+
 @noinline Base.Math.log10(x::TracedRNumber) = Base.Math._log(x, Val(10), :log10)
 @noinline Base.Math.log2(x::TracedRNumber) = Base.Math._log(x, Val(2), :log2)
 Base.Math._log(x::TracedRNumber, base, ::Symbol) = log(x) / log(Reactant._unwrap_val(base))
