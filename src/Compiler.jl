@@ -2441,6 +2441,114 @@ macro code_xla(args...)
     end
 end
 
+function compile_mhlo_to_llvm_string(
+    mhlo_text::String; pass_pipeline::String="", xla_runtime::Bool=false
+)
+    out_str_ref = Ref{Ptr{Cchar}}(C_NULL)
+
+    exec_ptr = ccall(
+        (:ReactantCompileMhloToLLVM, Reactant_jll.libReactantExtra),
+        Ptr{Cvoid},
+        (Cstring, Csize_t, Ref{Ptr{Cchar}}, UInt8, Cstring),
+        mhlo_text,
+        sizeof(mhlo_text),
+        out_str_ref,
+        UInt8(xla_runtime),
+        pass_pipeline,
+    )
+
+    if exec_ptr == C_NULL
+        error("Reactant XLA compilation to LLVM failed.")
+    end
+
+    llvm_ir = ""
+    if out_str_ref[] != C_NULL
+        llvm_ir = unsafe_string(out_str_ref[])
+        Libc.free(out_str_ref[])
+    end
+
+    ccall(
+        (:ReactantFreeLocalExecutable, Reactant_jll.libReactantExtra),
+        Cvoid,
+        (Ptr{Cvoid},),
+        exec_ptr,
+    )
+
+    return llvm_ir
+end
+
+"""
+    code_xla_llvm(ctx, f, args; fn_kwargs = NamedTuple(), debug=false, xla_runtime=false, pass_pipeline="", kwargs...)
+
+Compile the function `f` with arguments `args` and return the compiled LLVM IR.
+
+See also: [`@code_xla_llvm`](@ref).
+"""
+function code_xla_llvm(
+    ctx, f, args; fn_kwargs=NamedTuple(), debug=false, xla_runtime=false, pass_pipeline="", kwargs...
+)
+    if f isa Thunk
+        FTy = thunk_fn_type(f)
+        error(
+            "`@code_xla_llvm` expects the original function, not a compiled `Thunk`. " *
+            "Pass the original function directly (of type `$FTy`), e.g. `@code_xla_llvm my_function(args...)`.",
+        )
+    end
+    options = Dict(
+        k => v isa QuoteNode ? v.value : v for (k, v) in get_common_compile_options()
+    )
+    options[:shardy_passes] = :none
+    merge!(options, pairs(kwargs))
+    mod, mlir_fn_res = compile_mlir(ctx, f, args; fn_kwargs, options...)
+    try
+        tm = TextualModule((mod); debug)
+        return compile_mhlo_to_llvm_string(tm.ir; pass_pipeline=pass_pipeline, xla_runtime=xla_runtime)
+    finally
+        MLIR.IR.dispose(mod)
+    end
+end
+
+"""
+    @code_xla_llvm [optimize = ...] [no_nan = <true/false>] f(args...)
+
+Similar to `@code_hlo`, but runs additional passes to export the stablehlo module to MHLO.
+
+## Options
+
+$(COMMON_COMPILE_OPTIONS_DOCS)
+
+See also [`@code_xla`](@ref), [`@code_hlo`](@ref).
+"""
+macro code_xla_llvm(args...)
+    (; f, args, kwargs, options) = parse_call_expr(
+        merge(
+            get_common_compile_options(),
+            Dict{Symbol,Any}(
+                :shardy_passes => :(:none),
+                :debug => false,
+                :strip => :(:none),
+                :xla_runtime => false,
+                :pass_pipeline => "",
+            ),
+        ),
+        args...,
+    )
+    debug = get(() -> Expr(:kw, :debug, false), options, something(findfirst(opt -> opt.args[1] === :debug, options), -1)).args[2]
+    options = filter(opt -> opt.args[1] !== :debug, options)
+    return quote
+        $MLIR.IR.@dispose ctx = $Reactant.ReactantContext() begin
+            $code_xla_llvm(
+                ctx,
+                $(esc(f)),
+                $(esc(args));
+                fn_kwargs=(; $(esc.(kwargs)...)),
+                debug=$(esc(debug)),
+                $(esc.(options)...),
+            )
+        end
+    end
+end
+
 """
     @compile [optimize = ...] [no_nan = <true/false>] [sync = <true/false>] f(args...)
 
